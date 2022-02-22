@@ -252,7 +252,7 @@ class FullyConnectedNet(object):
         # self.bn_params[1] to the forward pass for the second batch normalization #
         # layer, etc.                                                              #
         ############################################################################
-        caches = {}
+        caches, dropout_caches = {}, {}
         prev_input = X
         gamma, beta, cur_bn_param = None, None, None
         for i in range(1, self.num_layers):
@@ -263,9 +263,13 @@ class FullyConnectedNet(object):
             gamma = self.params['gamma'+str(i)]
             beta  = self.params['beta'+str(i)]
             cur_bn_param = self.bn_params[i-1]
-          
-          prev_input, cache = self.affine_norm_relu_forward(prev_input, W, b, gamma, beta, cur_bn_param, self.use_batchnorm)
-          caches[i-1] = cache
+
+          prev_input, caches[i-1] = self.affine_norm_relu_forward(prev_input, W, b, gamma, beta, cur_bn_param, self.use_batchnorm)
+
+          if self.use_dropout:
+            prev_input, dropout_caches[i-1] = dropout_forward(prev_input, self.dropout_param)
+          else:
+            dropout_caches[i-1] = None
           
         scores, last_cache = affine_forward(prev_input, self.params["W" + str(self.num_layers)], self.params["b" + str(self.num_layers)])
         caches[self.num_layers-1] = last_cache
@@ -306,7 +310,7 @@ class FullyConnectedNet(object):
 
         for i in range(self.num_layers - 2, -1, -1):
           dx, dW, db, dgamma, dbeta = self.affine_norm_relu_backward(dx, caches[i], self.use_batchnorm,
-                                                                self.use_dropout)
+                                                                self.use_dropout, dropout_caches[i])
           if self.use_batchnorm:
             grads['gamma'+str(i+1)] = dgamma
             grads['beta' +str(i+1)] = dbeta
@@ -330,15 +334,16 @@ class FullyConnectedNet(object):
       out, relu_cache = relu_forward(out)
       return out, (fc_cache, bn_cache, relu_cache)
 
-    def affine_norm_relu_backward(self, dout, cache, use_batchnorm, use_dropout)->tuple:
+    def affine_norm_relu_backward(self, dout, cache, use_batchnorm, use_dropout, drop_cache)->tuple:
       fc_cache, bn_cache, relu_cache = cache
-      # relu
+      if use_dropout:
+        dout = dropout_backward(dout, drop_cache)
       dout = relu_backward(dout, relu_cache)
-      # batch/layer norm
+      
       dgamma, dbeta = None, None
       if use_batchnorm:
         dout, dgamma, dbeta = batchnorm_backward(dout, bn_cache)   
       
-      # affine layer
+      
       dx, dw, db = affine_backward(dout, fc_cache)
       return dx, dw, db, dgamma, dbeta
