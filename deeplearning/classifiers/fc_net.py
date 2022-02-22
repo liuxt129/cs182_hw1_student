@@ -180,14 +180,19 @@ class FullyConnectedNet(object):
         # parameters should be initialized to zero.                                #
         ############################################################################
         prev_dim = input_dim
-        for i in range(1, self.num_layers, 1):
+        for i in range(1, self.num_layers):
           curr_dim = hidden_dims[i - 1]
           self.params[("W" + str(i))] = np.random.normal(0, weight_scale,(prev_dim, curr_dim))
           self.params[("b" + str(i))] = np.zeros(curr_dim)
-          
+
+          if self.use_batchnorm:
+            self.params[("gamma" + str(i))] = np.ones(curr_dim)
+            self.params[("beta" + str(i))] = np.zeros(curr_dim)
+
           prev_dim = curr_dim
+
         last = self.num_layers
-        self.params[("W" + str(last))] = np.random.normal(0.0, weight_scale,(prev_dim, num_classes))
+        self.params[("W" + str(last))] = np.random.normal(0, weight_scale,(prev_dim, num_classes))
         self.params[("b" + str(last))] = np.zeros(num_classes)
 
         ############################################################################
@@ -247,24 +252,24 @@ class FullyConnectedNet(object):
         # self.bn_params[1] to the forward pass for the second batch normalization #
         # layer, etc.                                                              #
         ############################################################################
-        relu_cache = {}
-        affine_cache = {}
-        
-        last_input = X
-        # (Affine - ReLU) - Affine - softmax
-        # W1, b1; W2, b2 .... W_number of layers - 1, b_number of layers - 1
-        for i in np.arange(1, self.num_layers, 1):
-          # Affine
-          temp_out, temp_cache = affine_forward(last_input, self.params["W" + str(i)], self.params["b" + str(i)])
-          affine_cache[i] = temp_cache
-          # ReLu
-          temp_out, temp_cache = relu_forward(temp_out)
-          relu_cache[i] = temp_cache
-          
-          last_input = temp_out
-        i = self.num_layers
-        scores, last_cache = affine_forward(last_input, self.params["W" + str(i)], self.params["b" + str(i)])
+        caches = {}
+        prev_input = X
+        gamma, beta, cur_bn_param = None, None, None
+        for i in range(1, self.num_layers):
+          W = self.params['W'+str(i)]
+          b = self.params['b'+str(i)]
 
+          if self.use_batchnorm:
+            gamma = self.params['gamma'+str(i)]
+            beta  = self.params['beta'+str(i)]
+            cur_bn_param = self.bn_params[i-1]
+          
+          prev_input, cache = self.affine_norm_relu_forward(prev_input, W, b, gamma, beta, cur_bn_param, self.use_batchnorm)
+          caches[i-1] = cache
+          
+        scores, last_cache = affine_forward(prev_input, self.params["W" + str(self.num_layers)], self.params["b" + str(self.num_layers)])
+        caches[self.num_layers-1] = last_cache
+        
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
@@ -289,24 +294,51 @@ class FullyConnectedNet(object):
         # of 0.5 to simplify the expression for the gradient.                      #
         ############################################################################
         reg = self.reg
-        num_layers = self.num_layers
         loss, dsoftmax = softmax_loss(scores, y)
-        for i in range(1, num_layers + 1, 1):
-          loss += 0.5 * reg * np.sum(self.params["W" + str(i)] * self.params["W" + str(i)])
+        for i in range(1, self.num_layers + 1):
+          w = self.params['W'+str(i)]
+          loss += 0.5 * reg * np.sum(w * w) 
+
         
-        
-        dlast, dW, db = affine_backward(dsoftmax, last_cache)
-        grads["W" + str(num_layers)] = dW + reg * self.params["W"+ str(num_layers)]
-        grads["b" + str(num_layers)] = db
-        
-        for i in range(self.num_layers - 1, 0, -1):
-          dlast = relu_backward(dlast, relu_cache[i]) 
-          dlast, dW, db = affine_backward(dlast, affine_cache[i])
-          grads["W" + str(i)] = dW + reg * self.params["W"+ str(i)]
-          grads["b" + str(i)] = db
+        dx, dW, db = affine_backward(dsoftmax, caches[self.num_layers-1])
+        grads['W' + str(self.num_layers)] = dW + reg * self.params['W' + str(self.num_layers)]
+        grads['b' + str(self.num_layers)] = db
+
+        for i in range(self.num_layers - 2, -1, -1):
+          dx, dW, db, dgamma, dbeta = self.affine_norm_relu_backward(dx, caches[i], self.use_batchnorm,
+                                                                self.use_dropout)
+          if self.use_batchnorm:
+            grads['gamma'+str(i+1)] = dgamma
+            grads['beta' +str(i+1)] = dbeta
+          grads['W' + str(i + 1)] = dW + reg * self.params['W' + str(i + 1)]
+          grads['b' + str(i + 1)] = db
 
         ############################################################################
         #                             END OF YOUR CODE                             #
         ############################################################################
 
         return loss, grads
+  
+    def affine_norm_relu_forward(self, x, w, b, gamma, beta, cur_param, use_batchnorm)->tuple:
+      bn_cache = None
+      # affine
+      out, fc_cache = affine_forward(x,w,b)
+      # batch norm
+      if use_batchnorm:
+        out, bn_cache = batchnorm_forward(out, gamma, beta, cur_param)      
+      # relu
+      out, relu_cache = relu_forward(out)
+      return out, (fc_cache, bn_cache, relu_cache)
+
+    def affine_norm_relu_backward(self, dout, cache, use_batchnorm, use_dropout)->tuple:
+      fc_cache, bn_cache, relu_cache = cache
+      # relu
+      dout = relu_backward(dout, relu_cache)
+      # batch/layer norm
+      dgamma, dbeta = None, None
+      if use_batchnorm:
+        dout, dgamma, dbeta = batchnorm_backward(dout, bn_cache)   
+      
+      # affine layer
+      dx, dw, db = affine_backward(dout, fc_cache)
+      return dx, dw, db, dgamma, dbeta
